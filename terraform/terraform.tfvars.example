@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars and adjust as needed.
+# aws_region = "us-east-1"
+
+# Optional: grant cluster admin to additional IAM principals (roles/users).
+# cluster_admin_principal_arns = [
+#   "arn:aws:iam::123456789012:role/MyAdminRole",
+# ]
