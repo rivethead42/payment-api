@@ -1,0 +1,102 @@
+# Deployment runs the payment-api Node.js application with HA and security hardening.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-api
+  namespace: payment-api
+  labels:
+    app: payment-api
+    app.kubernetes.io/name: payment-api
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: payment-api
+    environment: prod
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: payment-api
+      app.kubernetes.io/name: payment-api
+      app.kubernetes.io/version: "1.0.0"
+      environment: prod
+  template:
+    metadata:
+      labels:
+        app: payment-api
+        app.kubernetes.io/name: payment-api
+        app.kubernetes.io/version: "1.0.0"
+        environment: prod
+    spec:
+      restartPolicy: Always
+      # Pod-level security: non-root user matching the container image (appuser UID 1001).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+      # Spread pods across availability zones when possible.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: payment-api
+      containers:
+        - name: payment-api
+          image: 337748711987.dkr.ecr.us-east-1.amazonaws.com/payment-api:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          # Bulk-load non-sensitive config from ConfigMap.
+          envFrom:
+            - configMapRef:
+                name: payment-api-config
+          # Placeholder: add keys to payment-api-config and they will be injected when present.
+          env:
+            - name: PAYMENT_PROCESSOR_MODE
+              valueFrom:
+                configMapKeyRef:
+                  name: payment-api-config
+                  key: PAYMENT_PROCESSOR_MODE
+                  optional: true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          # Liveness: restart the container if the app stops responding.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Readiness: remove the pod from Service endpoints until healthy.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Container-level security hardening.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          # Writable /tmp required when root filesystem is read-only.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

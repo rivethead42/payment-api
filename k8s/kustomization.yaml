@@ -1,0 +1,17 @@
+# Kustomize overlay: apply all resources with one command (kubectl apply -k k8s/).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: payment-api
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - hpa.yaml
+  - pdb.yaml
+
+commonLabels:
+  managed-by: kustomize
+  environment: prod

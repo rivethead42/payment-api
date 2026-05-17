@@ -1,0 +1,8 @@
+# Namespace isolates payment-api resources from other workloads on the cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: payment-api
+  labels:
+    app.kubernetes.io/name: payment-api
+    environment: prod

@@ -1,0 +1,19 @@
+# LoadBalancer Service exposes the API on the public internet (no Ingress in this demo).
+# After apply, wait for EXTERNAL-IP or hostname from the AWS cloud controller.
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-api
+  namespace: payment-api
+  labels:
+    app: payment-api
+    app.kubernetes.io/name: payment-api
+spec:
+  type: LoadBalancer
+  selector:
+    app: payment-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+      protocol: TCP

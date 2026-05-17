@@ -1,0 +1,14 @@
+# PodDisruptionBudget keeps at least one pod available during voluntary disruptions.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payment-api
+  namespace: payment-api
+  labels:
+    app: payment-api
+    app.kubernetes.io/name: payment-api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: payment-api

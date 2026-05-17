@@ -1,0 +1,30 @@
+# HorizontalPodAutoscaler scales the Deployment based on CPU and memory utilization.
+# Requires metrics-server (or equivalent) on the cluster.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: payment-api
+  namespace: payment-api
+  labels:
+    app: payment-api
+    app.kubernetes.io/name: payment-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: payment-api
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80

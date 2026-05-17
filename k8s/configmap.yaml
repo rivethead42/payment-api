@@ -1,0 +1,10 @@
+# Non-sensitive application configuration. Secrets are not used in this demo.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payment-api-config
+  namespace: payment-api
+data:
+  NODE_ENV: "production"
+  PORT: "3000"
+  LOG_LEVEL: "info"
