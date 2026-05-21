@@ -1,0 +1,364 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION        = 'us-east-1'
+        ECR_REPOSITORY    = 'payment-api'
+        EKS_CLUSTER_NAME  = 'demo-eks-cluster'
+        K8S_NAMESPACE     = 'payment-api'
+        DEPLOYMENT_NAME   = 'payment-api'
+        SCRIPTS_DIR       = 'jenkins/scripts'
+        TRIVY_REPORT      = 'trivy-report.json'
+        PUSH_FAILED       = 'false'
+        ROLLBACK_NEEDED   = 'false'
+    }
+
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        disableConcurrentBuilds()
+        timestamps()
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.GIT_COMMIT = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
+                    def branch = env.BRANCH_NAME ?: sh(returnStdout: true, script: 'git rev-parse --abbrev-ref HEAD').trim()
+                    env.GIT_BRANCH = branch
+                    env.GIT_BRANCH_SHORT = branch.replaceAll('^origin/', '').replaceAll('/', '-')
+
+                    def manualBuild = currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause')
+                    def paramTag = params.IMAGE_TAG?.trim()
+                    if (manualBuild && paramTag && paramTag != 'latest') {
+                        env.IMAGE_TAG = paramTag
+                    } else {
+                        env.IMAGE_TAG = env.GIT_COMMIT.take(7)
+                    }
+
+                    withCredentials([string(credentialsId: 'ecr-account-id', variable: 'ECR_ACCOUNT_ID')]) {
+                        env.ECR_REGISTRY = "${ECR_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+                    }
+                    env.IMAGE_NAME = "${env.ECR_REGISTRY}/${ECR_REPOSITORY}:${env.IMAGE_TAG}"
+
+                    echo "Branch: ${env.GIT_BRANCH_SHORT}"
+                    echo "Commit: ${env.IMAGE_TAG} (${env.GIT_COMMIT})"
+                    echo "Image:  ${env.IMAGE_NAME}"
+
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} - ${env.GIT_BRANCH_SHORT} - ${env.IMAGE_TAG}"
+                }
+            }
+        }
+
+        stage('Lint and validate') {
+            when {
+                expression { return params.SKIP_TESTS != true }
+            }
+            steps {
+                dir('app') {
+                    sh '''
+                        set -e
+                        if [ -f package-lock.json ]; then
+                            npm ci
+                        else
+                            npm install
+                        fi
+                        npx tsc --noEmit
+                        if npm run 2>/dev/null | grep -qE '^  lint'; then
+                            npm run lint
+                        else
+                            echo "No lint script defined — skipping"
+                        fi
+                        if npm run 2>/dev/null | grep -qE '^  test'; then
+                            npm test
+                        else
+                            npm run test:ci
+                        fi
+                    '''
+                }
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: 'app/**/junit.xml, app/junit.xml, **/junit.xml'
+                }
+            }
+        }
+
+        stage('Build Docker image') {
+            steps {
+                script {
+                    env.BUILD_DATE = sh(returnStdout: true, script: "date -u +'%Y-%m-%dT%H:%M:%SZ'").trim()
+                }
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-credentials',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    ),
+                    string(credentialsId: 'ecr-account-id', variable: 'ECR_ACCOUNT_ID')
+                ]) {
+                    sh """
+                        export AWS_DEFAULT_REGION='${AWS_REGION}'
+                        export ECR_REGISTRY='${ECR_REGISTRY}'
+                        export ECR_REPOSITORY='${ECR_REPOSITORY}'
+                        export GIT_COMMIT='${GIT_COMMIT}'
+                        export GIT_BRANCH='${GIT_BRANCH}'
+                        export IMAGE_NAME='${IMAGE_NAME}'
+                        bash '${SCRIPTS_DIR}/build.sh' build
+                    """
+                }
+            }
+        }
+
+        stage('Security scan') {
+            steps {
+                sh """
+                    docker run --rm \
+                      -v /var/run/docker.sock:/var/run/docker.sock \
+                      -v "\$(pwd)":/workspace \
+                      -w /workspace \
+                      aquasec/trivy:latest image \
+                      --severity CRITICAL \
+                      --exit-code 1 \
+                      --format json \
+                      --output ${TRIVY_REPORT} \
+                      '${IMAGE_NAME}'
+                """
+            }
+        }
+
+        stage('Push to ECR') {
+            steps {
+                script {
+                    env.PUSH_FAILED = 'false'
+                    catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                        withCredentials([
+                            usernamePassword(
+                                credentialsId: 'aws-credentials',
+                                usernameVariable: 'AWS_ACCESS_KEY_ID',
+                                passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                            )
+                        ]) {
+                            def rc = sh(
+                                script: """
+                                    export AWS_DEFAULT_REGION='${AWS_REGION}'
+                                    export ECR_REGISTRY='${ECR_REGISTRY}'
+                                    export ECR_REPOSITORY='${ECR_REPOSITORY}'
+                                    export GIT_COMMIT='${GIT_COMMIT}'
+                                    export GIT_BRANCH='${GIT_BRANCH}'
+                                    export IMAGE_NAME='${IMAGE_NAME}'
+                                    bash '${SCRIPTS_DIR}/build.sh' push
+                                """,
+                                returnStatus: true
+                            )
+                            if (rc != 0) {
+                                env.PUSH_FAILED = 'true'
+                                error('ECR push failed')
+                            }
+                        }
+                    }
+                    if (currentBuild.result == 'FAILURE') {
+                        env.PUSH_FAILED = 'true'
+                    }
+                }
+            }
+        }
+
+        stage('Configure kubeconfig') {
+            when {
+                expression { env.PUSH_FAILED != 'true' }
+            }
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-credentials',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    ),
+                    file(credentialsId: 'eks-kubeconfig', variable: 'KUBECONFIG_FILE')
+                ]) {
+                    sh '''
+                        export AWS_DEFAULT_REGION="${AWS_REGION}"
+                        rm -f "${WORKSPACE}/.kubeconfig"
+                        cp "${KUBECONFIG_FILE}" "${WORKSPACE}/.kubeconfig"
+                        chmod 600 "${WORKSPACE}/.kubeconfig"
+                        export KUBECONFIG="${WORKSPACE}/.kubeconfig"
+                        kubectl cluster-info
+                        kubectl get nodes
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to EKS') {
+            when {
+                expression { env.PUSH_FAILED != 'true' }
+            }
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-credentials',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh """
+                        export AWS_DEFAULT_REGION='${AWS_REGION}'
+                        export KUBECONFIG='${WORKSPACE}/.kubeconfig'
+                        export IMAGE_NAME='${IMAGE_NAME}'
+                        bash '${SCRIPTS_DIR}/deploy.sh'
+                    """
+                }
+            }
+            post {
+                failure {
+                    script { env.ROLLBACK_NEEDED = 'true' }
+                }
+            }
+        }
+
+        stage('Smoke test') {
+            when {
+                expression { env.PUSH_FAILED != 'true' }
+            }
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-credentials',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh '''
+                        export AWS_DEFAULT_REGION="${AWS_REGION}"
+                        export KUBECONFIG="${WORKSPACE}/.kubeconfig"
+
+                        echo "==> Waiting 30s for LoadBalancer..."
+                        sleep 30
+
+                        LB_HOST=$(kubectl get svc payment-api -n "${K8S_NAMESPACE}" \
+                          -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+                        if [ -z "${LB_HOST}" ]; then
+                          LB_HOST=$(kubectl get svc payment-api -n "${K8S_NAMESPACE}" \
+                            -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+                        fi
+                        if [ -z "${LB_HOST}" ]; then
+                          echo "ERROR: LoadBalancer hostname/IP not available" >&2
+                          kubectl get svc payment-api -n "${K8S_NAMESPACE}"
+                          exit 1
+                        fi
+                        echo "==> LoadBalancer: http://${LB_HOST}/"
+                        curl -f --retry 5 --retry-delay 10 "http://${LB_HOST}/health"
+                        echo "==> Smoke test passed"
+                    '''
+                }
+            }
+            post {
+                failure {
+                    script { env.ROLLBACK_NEEDED = 'true' }
+                }
+            }
+        }
+
+        stage('Rollback') {
+            when {
+                expression { env.ROLLBACK_NEEDED == 'true' && env.PUSH_FAILED != 'true' }
+            }
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-credentials',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh """
+                        export AWS_DEFAULT_REGION='${AWS_REGION}'
+                        export KUBECONFIG='${WORKSPACE}/.kubeconfig'
+                        bash '${SCRIPTS_DIR}/rollback.sh'
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            sh "docker rmi '${IMAGE_NAME}' || true"
+            archiveArtifacts artifacts: "${TRIVY_REPORT}", allowEmptyArchive: true, fingerprint: true
+        }
+        success {
+            script {
+                if (env.PUSH_FAILED == 'true') {
+                    echo 'Build succeeded but ECR push failed — deploy stages were skipped.'
+                    return
+                }
+                echo '==> Deployment successful'
+                try {
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: 'aws-credentials',
+                            usernameVariable: 'AWS_ACCESS_KEY_ID',
+                            passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                        )
+                    ]) {
+                        def lb = sh(
+                            returnStdout: true,
+                            script: '''
+                                export AWS_DEFAULT_REGION="${AWS_REGION}"
+                                export KUBECONFIG="${WORKSPACE}/.kubeconfig"
+                                HOST=$(kubectl get svc payment-api -n "${K8S_NAMESPACE}" \
+                                  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+                                if [ -z "${HOST}" ]; then
+                                  HOST=$(kubectl get svc payment-api -n "${K8S_NAMESPACE}" \
+                                    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+                                fi
+                                echo "${HOST}"
+                            '''
+                        ).trim()
+                        if (lb) {
+                            echo "Payment API URL: http://${lb}/"
+                            echo "Health check:    http://${lb}/health"
+                        }
+                    }
+                } catch (Exception e) {
+                    echo "Could not retrieve LoadBalancer URL: ${e.message}"
+                }
+            }
+        }
+        failure {
+            script {
+                echo '==> Pipeline failed — see stage logs above.'
+                try {
+                    withCredentials([string(credentialsId: 'slack-webhook-url', variable: 'SLACK_WEBHOOK')]) {
+                        sh """
+                            curl -sS -X POST -H 'Content-type: application/json' \
+                              --data '{"text":"payment-api pipeline FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER} (${env.IMAGE_TAG})"}' \
+                              "\${SLACK_WEBHOOK}" || true
+                        """
+                    }
+                } catch (Exception e) {
+                    echo "Slack notification skipped: ${e.message}"
+                }
+            }
+        }
+        unstable {
+            script {
+                echo '==> Build unstable — tests passed with warnings.'
+                try {
+                    withCredentials([string(credentialsId: 'slack-webhook-url', variable: 'SLACK_WEBHOOK')]) {
+                        sh """
+                            curl -sS -X POST -H 'Content-type: application/json' \
+                              --data '{"text":"payment-api pipeline UNSTABLE: ${env.JOB_NAME} #${env.BUILD_NUMBER}"}' \
+                              "\${SLACK_WEBHOOK}" || true
+                        """
+                    }
+                } catch (Exception e) {
+                    echo "Slack notification skipped: ${e.message}"
+                }
+            }
+        }
+    }
+}
