@@ -1,0 +1,19 @@
+# Headless Service so in-cluster callers can resolve all payment-api pod IPs
+# (used by /internal/force-error cluster-wide broadcast).
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-api-headless
+  namespace: payment-api
+  labels:
+    app: payment-api
+    app.kubernetes.io/name: payment-api
+spec:
+  clusterIP: None
+  selector:
+    app: payment-api
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      protocol: TCP
