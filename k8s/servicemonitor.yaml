@@ -1,0 +1,22 @@
+# ServiceMonitor instructs Prometheus (kube-prometheus-stack) to scrape payment-api /metrics.
+# Apply separately from the payment-api kustomize overlay (lives in the monitoring namespace).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: payment-api
+  namespace: monitoring
+  labels:
+    app: payment-api
+    release: kube-prometheus
+spec:
+  namespaceSelector:
+    matchNames:
+      - payment-api
+  selector:
+    matchLabels:
+      app: payment-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s

@@ -64,3 +64,13 @@ kubectl set image deployment/payment-api \
   payment-api=337748711987.dkr.ecr.us-east-1.amazonaws.com/payment-api:<new-tag> \
   -n payment-api
 ```
+
+## 9. Prometheus metrics
+
+The API exposes Prometheus metrics at `/metrics` (see `app/src/app.ts`). To scrape them with kube-prometheus-stack, apply the ServiceMonitor after the monitoring stack is installed:
+
+```bash
+kubectl apply -f k8s/servicemonitor.yaml
+```
+
+See [monitoring/README.md](monitoring/README.md) for Helm install, the **Payment API** Grafana dashboard, verification, and troubleshooting.

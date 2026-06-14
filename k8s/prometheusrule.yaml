@@ -1,0 +1,418 @@
+# PrometheusRule for payment-api alerts.
+# Requires kube-prometheus-stack with ruleSelector matching release: kube-prometheus.
+# Apply: kubectl apply -f k8s/prometheusrule.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: payment-api
+  namespace: monitoring
+  labels:
+    release: kube-prometheus
+    app.kubernetes.io/name: payment-api
+    app.kubernetes.io/part-of: payment-api
+spec:
+  groups:
+    # -------------------------------------------------------------------------
+    # 1. Availability
+    # -------------------------------------------------------------------------
+    - name: payment-api.availability
+      rules:
+        - alert: PaymentAPIDown
+          expr: |
+            kube_deployment_status_replicas_available{
+              namespace="payment-api",
+              deployment="payment-api"
+            } == 0
+          for: 1m
+          labels:
+            severity: critical
+            service: payment-api
+          annotations:
+            summary: "Payment API has zero healthy pods"
+            description: >-
+              No available replicas for deployment payment-api in namespace
+              payment-api. Current available replicas: {{ $value }}.
+            runbook_url: "https://wiki.globalmatics.internal/runbooks/PaymentAPIDown"
+
+        - alert: PaymentAPIReplicasMismatch
+          expr: |
+            (
+              kube_deployment_spec_replicas{
+                namespace="payment-api",
+                deployment="payment-api"
+              }
+              -
+              kube_deployment_status_replicas_available{
+                namespace="payment-api",
+                deployment="payment-api"
+              }
+            ) > 0
+          for: 3m
+          labels:
+            severity: warning
+            service: payment-api
+          annotations:
+            summary: "Payment API available replicas below desired count"
+            description: >-
+              Deployment payment-api has fewer available replicas than desired.
+              Replica deficit: {{ $value }} (spec minus available; desired count is 2).
+            runbook_url: "https://wiki.globalmatics.internal/runbooks/PaymentAPIReplicasMismatch"
+
+        - alert: PaymentAPICrashLooping
+          expr: |
+            sum by (pod) (
+              increase(
+                kube_pod_container_status_restarts_total{
+                  namespace="payment-api",
+                  pod=~"payment-api-.*",
+                  container="payment-api"
+                }[15m]
+              )
+            ) > 3
+          for: 1m
+          labels:
+            severity: critical
+            service: payment-api
+          annotations:
+            summary: "Payment API pod is crash-looping"
+            description: >-
+              Pod {{ $labels.pod }} in namespace payment-api restarted more than
+              3 times in the last 15 minutes (restart count increase:
+              {{ $value | printf "%.0f" }}).
+            runbook_url: "https://wiki.globalmatics.internal/runbooks/PaymentAPICrashLooping"
+
+    # -------------------------------------------------------------------------
+    # 2. Error rate
+    # -------------------------------------------------------------------------
+    - name: payment-api.error-rate
+      rules:
+        - alert: PaymentAPIHighErrorRate
+          expr: |
+            100 *
+            sum(rate(http_requests_total{
+              namespace="payment-api",
+              status_code=~"5..",
+              route!~"/health|/metrics|/ready"
+            }[5m]))
+            /
+            clamp_min(sum(rate(http_requests_total{
+              namespace="payment-api",
+              route!~"/health|/metrics|/ready"
+            }[5m])), 0.001)
+            > 1
+          for: 5m
+          labels:
+            severity: warning
+            service: payment-api
+          annotations:
+            summary: "Payment API 5xx error rate exceeds 1%"
+            description: >-
+              HTTP 5xx error rate is {{ $value | printf "%.2f" }}% over the last
+              5 minutes (SLO target: ≤ 0.1%).
+            runbook_url: "https://wiki.globalmatics.internal/runbooks/PaymentAPIHighErrorRate"
+
+        - alert: PaymentAPICriticalErrorRate
+          expr: |
+            100 *
+            sum(rate(http_requests_total{
+              namespace="payment-api",
+              status_code=~"5..",
+              route!~"/health|/metrics|/ready"
+            }[2m]))
+            /
+            clamp_min(sum(rate(http_requests_total{
+              namespace="payment-api",
+              route!~"/health|/metrics|/ready"
+            }[2m])), 0.001)
+            > 5
+          for: 2m
+          labels:
+            severity: critical
+            service: payment-api
+          annotations:
+            summary: "Payment API 5xx error rate exceeds 5%"
+            description: >-
+              HTTP 5xx error rate is {{ $value | printf "%.2f" }}% over the last
+              2 minutes — immediate investigation required.
+            runbook_url: "https://wiki.globalmatics.internal/runbooks/PaymentAPICriticalErrorRate"
+
+        - alert: PaymentAPIHighClientErrorRate
+          expr: |
+            100 *
+            sum(rate(http_requests_total{
+              namespace="payment-api",
+              status_code=~"4..",
+              status_code!="404",
+              route!~"/health|/metrics|/ready"
+            }[10m]))
+            /
+            clamp_min(sum(rate(http_requests_total{
+              namespace="payment-api",
+              route!~"/health|/metrics|/ready"
+            }[10m])), 0.001)
+            > 10
+          for: 10m
+          labels:
+            severity: warning
+            service: payment-api
+          annotations:
+            summary: "Payment API 4xx error rate exceeds 10% (404 excluded)"
+            description: >-
+              HTTP 4xx error rate (excluding 404) is {{ $value | printf "%.2f" }}%
+              over the last 10 minutes.
+            runbook_url: "https://wiki.globalmatics.internal/runbooks/PaymentAPIHighClientErrorRate"
+
+    # -------------------------------------------------------------------------
+    # 3. Latency
+    # -------------------------------------------------------------------------
+    - name: payment-api.latency
+      rules:
+        - alert: PaymentAPIHighLatency
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(http_request_duration_seconds_bucket{
+                namespace="payment-api",
+                route!~"/health|/metrics|/ready"
+              }[5m])) by (le)
+            ) > 0.5
+          for: 5m
+          labels:
+            severity: warning
+            service: payment-api
+          annotations:
+            summary: "Payment API P99 latency exceeds 500ms"
+            description: >-
+              P99 request latency is {{ $value | humanizeDuration }} sustained
+              for 5 minutes (SLO target: ≤ 500ms).
+            runbook_url: "https://wiki.globalmatics.internal/runbooks/PaymentAPIHighLatency"
+
+        - alert: PaymentAPICriticalLatency
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(http_request_duration_seconds_bucket{
+                namespace="payment-api",
+                route!~"/health|/metrics|/ready"
+              }[3m])) by (le)
+            ) > 1.0
+          for: 3m
+          labels:
+            severity: critical
+            service: payment-api
+          annotations:
+            summary: "Payment API P99 latency exceeds 1 second"
+            description: >-
+              P99 request latency is {{ $value | humanizeDuration }} sustained
+              for 3 minutes — customer-facing impact likely.
+            runbook_url: "https://wiki.globalmatics.internal/runbooks/PaymentAPICriticalLatency"
+
+        - alert: PaymentAPIElevatedP95Latency
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(http_request_duration_seconds_bucket{
+                namespace="payment-api",
+                route!~"/health|/metrics|/ready"
+              }[10m])) by (le)
+            ) > 0.3
+          for: 10m
+          labels:
+            severity: info
+            service: payment-api
+          annotations:
+            summary: "Payment API P95 latency elevated above 300ms"
+            description: >-
+              P95 request latency is {{ $value | humanizeDuration }} sustained
+              for 10 minutes — early warning before SLO breach.
+            runbook_url: "https://wiki.globalmatics.internal/runbooks/PaymentAPIElevatedP95Latency"
+
+    # -------------------------------------------------------------------------
+    # 4. Payment business metrics
+    # NOTE: payment_transactions_total is not yet exported by the application.
+    #       Implement the metric in app/src/lib/metrics.ts before these alerts
+    #       will evaluate. See ASSUMPTIONS in the monitoring README.
+    # -------------------------------------------------------------------------
+    - name: payment-api.business
+      rules:
+        - alert: PaymentAPIHighFailureRate
+          expr: |
+            100 *
+            sum(rate(payment_transactions_total{
+              namespace="payment-api",
+              status="failure"
+            }[5m]))
+            /
+            clamp_min(sum(rate(payment_transactions_total{
+              namespace="payment-api"
+            }[5m])), 0.001)
+            > 2
+          for: 5m
+          labels:
+            severity: critical
+            service: payment-api
+          annotations:
+            summary: "Payment transaction failure rate exceeds 2%"
+            description: >-
+              Payment transaction failure rate is {{ $value | printf "%.2f" }}%
+              over the last 5 minutes.
+            runbook_url: "https://wiki.globalmatics.internal/runbooks/PaymentAPIHighFailureRate"
+
+        - alert: PaymentAPINoSuccessfulTransactions
+          expr: |
+            sum(increase(payment_transactions_total{
+              namespace="payment-api",
+              status="success"
+            }[10m])) == 0
+            and
+            sum(rate(http_requests_total{
+              namespace="payment-api",
+              route=~"/api/(checkout|payment).*",
+              route!~"/health|/metrics|/ready"
+            }[10m])) > 0
+          for: 10m
+          labels:
+            severity: critical
+            service: payment-api
+          annotations:
+            summary: "No successful payment transactions in 10 minutes"
+            description: >-
+              Zero successful payment transactions recorded in the last 10 minutes
+              while payment API routes are receiving traffic. This dead-man's-switch
+              alert indicates a silent processing failure.
+            runbook_url: "https://wiki.globalmatics.internal/runbooks/PaymentAPINoSuccessfulTransactions"
+
+        - alert: PaymentAPITransactionSpikeAnomaly
+          expr: |
+            (
+              sum(rate(payment_transactions_total{
+                namespace="payment-api",
+                status="failure"
+              }[5m]))
+              /
+              clamp_min(sum(rate(payment_transactions_total{
+                namespace="payment-api"
+              }[5m])), 0.001)
+            )
+            >
+            3 *
+            (
+              sum(rate(payment_transactions_total{
+                namespace="payment-api",
+                status="failure"
+              }[1h]))
+              /
+              clamp_min(sum(rate(payment_transactions_total{
+                namespace="payment-api"
+              }[1h])), 0.001)
+            )
+            and
+            sum(rate(payment_transactions_total{
+              namespace="payment-api"
+            }[5m])) > 0.01
+          for: 5m
+          labels:
+            severity: warning
+            service: payment-api
+          annotations:
+            summary: "Payment failure rate spike — 3× above 1-hour baseline"
+            description: >-
+              Short-window failure rate exceeds 3× the 1-hour rolling baseline
+              (current ratio: {{ $value | printf "%.4f" }}). Investigate processor
+              or upstream dependency degradation.
+            runbook_url: "https://wiki.globalmatics.internal/runbooks/PaymentAPITransactionSpikeAnomaly"
+
+    # -------------------------------------------------------------------------
+    # 5. SLO burn rate (99.9% availability target)
+    #
+    # Monthly error budget at 99.9% availability:
+    #   allowed error rate = 0.1% (0.001)
+    #   budget window      = 30 days ≈ 43.2 minutes of downtime
+    #
+    # Burn rate = (observed error rate) / (allowed error rate of 0.001)
+    #
+    # Fast burn (14×):
+    #   At 14× burn, the full monthly budget is consumed in ~43.2 min / 14 ≈ 3.1 min
+    #   of sustained bad state. Dual-window (5m + 1h) reduces false positives.
+    #
+    # Slow burn (3×):
+    #   At 3× burn, the full monthly budget is consumed in ~43.2 min / 3 ≈ 14.4 min
+    #   of sustained bad state, or ~14.4 hours at 3× over 6h windows.
+    #   Dual-window (30m + 6h) catches gradual degradation without paging.
+    # -------------------------------------------------------------------------
+    - name: payment-api.slo-burn-rate
+      rules:
+        - alert: PaymentAPISLOBurnRateFast
+          expr: |
+            (
+              sum(rate(http_requests_total{
+                namespace="payment-api",
+                status_code=~"5..",
+                route!~"/health|/metrics|/ready"
+              }[5m]))
+              /
+              clamp_min(sum(rate(http_requests_total{
+                namespace="payment-api",
+                route!~"/health|/metrics|/ready"
+              }[5m])), 0.001)
+            ) > (14 * 0.001)
+            and
+            (
+              sum(rate(http_requests_total{
+                namespace="payment-api",
+                status_code=~"5..",
+                route!~"/health|/metrics|/ready"
+              }[1h]))
+              /
+              clamp_min(sum(rate(http_requests_total{
+                namespace="payment-api",
+                route!~"/health|/metrics|/ready"
+              }[1h])), 0.001)
+            ) > (14 * 0.001)
+          for: 2m
+          labels:
+            severity: critical
+            service: payment-api
+          annotations:
+            summary: "Payment API SLO fast burn — 14× error budget consumption"
+            description: >-
+              5xx error rate exceeds 14× the 99.9% SLO allowance (0.1%) in both
+              the 5-minute and 1-hour windows. At this burn rate the monthly error
+              budget (~43 min) will be exhausted in under 5 minutes.
+            runbook_url: "https://wiki.globalmatics.internal/runbooks/PaymentAPISLOBurnRateFast"
+
+        - alert: PaymentAPISLOBurnRateSlow
+          expr: |
+            (
+              sum(rate(http_requests_total{
+                namespace="payment-api",
+                status_code=~"5..",
+                route!~"/health|/metrics|/ready"
+              }[30m]))
+              /
+              clamp_min(sum(rate(http_requests_total{
+                namespace="payment-api",
+                route!~"/health|/metrics|/ready"
+              }[30m])), 0.001)
+            ) > (3 * 0.001)
+            and
+            (
+              sum(rate(http_requests_total{
+                namespace="payment-api",
+                status_code=~"5..",
+                route!~"/health|/metrics|/ready"
+              }[6h]))
+              /
+              clamp_min(sum(rate(http_requests_total{
+                namespace="payment-api",
+                route!~"/health|/metrics|/ready"
+              }[6h])), 0.001)
+            ) > (3 * 0.001)
+          for: 15m
+          labels:
+            severity: warning
+            service: payment-api
+          annotations:
+            summary: "Payment API SLO slow burn — 3× error budget consumption"
+            description: >-
+              5xx error rate exceeds 3× the 99.9% SLO allowance (0.1%) in both
+              the 30-minute and 6-hour windows. At this burn rate the monthly
+              error budget (~43 min) will be exhausted in ~14 hours — create a ticket.
+            runbook_url: "https://wiki.globalmatics.internal/runbooks/PaymentAPISLOBurnRateSlow"

@@ -1,0 +1,21 @@
+# Apply monitoring prerequisites and the Payment API Grafana dashboard ConfigMap.
+# kube-prometheus-stack itself is installed via Helm (see README.md).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: monitoring
+
+resources:
+  - namespace.yaml
+  - grafana-secret.yaml
+
+configMapGenerator:
+  - name: grafana-dashboard-payment-api
+    files:
+      - dashboards/payment-api.json
+    options:
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"
+        app.kubernetes.io/name: payment-api
+        app.kubernetes.io/component: dashboard

@@ -1,0 +1,156 @@
+# Alertmanager configuration for payment-api Slack routing.
+#
+# kube-prometheus-stack integration — choose ONE of:
+#
+#   Option A (recommended): reference this Secret from Helm values:
+#     alertmanager:
+#       configFromSecret: payment-api-alertmanager-config
+#
+#   Option B: merge receivers/routes into k8s/monitoring/values.yaml under
+#     alertmanager.config, substituting the webhook URL from the Secret above.
+#
+# Replace [PLACEHOLDER_SLACK_WEBHOOK_URL] with the decoded slack-webhook-url
+# from alertmanager-slack-credentials before applying, or use:
+#   WEBHOOK=$(kubectl get secret alertmanager-slack-credentials -n monitoring \
+#     -o jsonpath='{.data.slack-webhook-url}' | base64 -d)
+#   sed "s|\[PLACEHOLDER_SLACK_WEBHOOK_URL\]|${WEBHOOK}|g" k8s/alertmanager-config.yaml | kubectl apply -f -
+#
+# Replace [GRAFANA_URL] with your Grafana LoadBalancer URL or ingress host.
+# Replace [CLUSTER_NAME] with the Prometheus externalLabels.cluster value.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: payment-api-alertmanager-config
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/part-of: kube-prometheus-stack
+    release: kube-prometheus
+type: Opaque
+stringData:
+  alertmanager.yaml: |
+    global:
+      resolve_timeout: 5m
+      slack_api_url: "[PLACEHOLDER_SLACK_WEBHOOK_URL]"
+
+    templates:
+      - "/etc/alertmanager/config/*.tmpl"
+
+    route:
+      receiver: slack-warning
+      group_by: ["alertname", "namespace", "severity"]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      routes:
+        # Maintenance window — drop all payment-api alerts (see inhibition below)
+        - matchers:
+            - alertname = "MaintenanceWindow"
+          receiver: "null"
+          continue: false
+
+        - matchers:
+            - severity = "critical"
+          receiver: slack-critical
+          group_wait: 0s
+          group_interval: 5m
+          repeat_interval: 1h
+          continue: false
+
+        - matchers:
+            - severity = "warning"
+          receiver: slack-warning
+          group_wait: 5m
+          group_interval: 10m
+          repeat_interval: 4h
+          continue: false
+
+        - matchers:
+            - severity = "info"
+          receiver: slack-info
+          group_wait: 10m
+          group_interval: 30m
+          repeat_interval: 12h
+          continue: false
+
+    receivers:
+      - name: "null"
+
+      - name: slack-critical
+        slack_configs:
+          - api_url: "[PLACEHOLDER_SLACK_WEBHOOK_URL]"
+            channel: "#payments-critical"
+            send_resolved: true
+            color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
+            title: >-
+              {{ if eq .Status "firing" }}🔴 {{ .CommonLabels.alertname }} — {{ .CommonLabels.severity | toUpper }}{{ else }}✅ RESOLVED: {{ .CommonLabels.alertname }}{{ end }}
+            text: |-
+              {{ range .Alerts }}
+              {{ if eq .Status "firing" }}*Status:* 🔴 FIRING{{ else }}*Status:* ✅ RESOLVED{{ end }}
+              *Summary:* {{ .Annotations.summary }}
+              *Description:* {{ .Annotations.description }}
+              *Cluster:* {{ .Labels.cluster | default "[CLUSTER_NAME]" }}
+              *Namespace:* {{ .Labels.namespace | default "payment-api" }}
+              *Runbook:* <{{ .Annotations.runbook_url }}|Open runbook>
+              *Grafana:* <[GRAFANA_URL]/explore?orgId=1&left=%7B%22datasource%22:%22Prometheus%22,%22queries%22:%5B%7B%22expr%22:%22ALERTS%7Balertname%3D%5C%22{{ .Labels.alertname }}%5C%22%7D%22,%22refId%22:%22A%22%7D%5D%7D|View in Grafana>
+              {{ end }}
+
+      - name: slack-warning
+        slack_configs:
+          - api_url: "[PLACEHOLDER_SLACK_WEBHOOK_URL]"
+            channel: "#payments-warnings"
+            send_resolved: true
+            color: '{{ if eq .Status "firing" }}warning{{ else }}good{{ end }}'
+            title: >-
+              {{ if eq .Status "firing" }}🟡 {{ .CommonLabels.alertname }} — {{ .CommonLabels.severity | toUpper }}{{ else }}✅ RESOLVED: {{ .CommonLabels.alertname }}{{ end }}
+            text: |-
+              {{ range .Alerts }}
+              {{ if eq .Status "firing" }}*Status:* 🟡 FIRING{{ else }}*Status:* ✅ RESOLVED{{ end }}
+              *Summary:* {{ .Annotations.summary }}
+              *Description:* {{ .Annotations.description }}
+              *Cluster:* {{ .Labels.cluster | default "[CLUSTER_NAME]" }}
+              *Namespace:* {{ .Labels.namespace | default "payment-api" }}
+              *Runbook:* <{{ .Annotations.runbook_url }}|Open runbook>
+              *Grafana:* <[GRAFANA_URL]/explore?orgId=1&left=%7B%22datasource%22:%22Prometheus%22,%22queries%22:%5B%7B%22expr%22:%22ALERTS%7Balertname%3D%5C%22{{ .Labels.alertname }}%5C%22%7D%22,%22refId%22:%22A%22%7D%5D%7D|View in Grafana>
+              {{ end }}
+
+      - name: slack-info
+        slack_configs:
+          - api_url: "[PLACEHOLDER_SLACK_WEBHOOK_URL]"
+            channel: "#payments-info"
+            send_resolved: true
+            color: '{{ if eq .Status "firing" }}#439FE0{{ else }}good{{ end }}'
+            title: >-
+              {{ if eq .Status "firing" }}🔵 {{ .CommonLabels.alertname }} — {{ .CommonLabels.severity | toUpper }}{{ else }}✅ RESOLVED: {{ .CommonLabels.alertname }}{{ end }}
+            text: |-
+              {{ range .Alerts }}
+              {{ if eq .Status "firing" }}*Status:* 🔵 FIRING{{ else }}*Status:* ✅ RESOLVED{{ end }}
+              *Summary:* {{ .Annotations.summary }}
+              *Description:* {{ .Annotations.description }}
+              *Cluster:* {{ .Labels.cluster | default "[CLUSTER_NAME]" }}
+              *Namespace:* {{ .Labels.namespace | default "payment-api" }}
+              *Runbook:* <{{ .Annotations.runbook_url }}|Open runbook>
+              *Grafana:* <[GRAFANA_URL]/explore?orgId=1&left=%7B%22datasource%22:%22Prometheus%22,%22queries%22:%5B%7B%22expr%22:%22ALERTS%7Balertname%3D%5C%22{{ .Labels.alertname }}%5C%22%7D%22,%22refId%22:%22A%22%7D%5D%7D|View in Grafana>
+              {{ end }}
+
+    inhibit_rules:
+      # Suppress warning alerts when a critical alert is firing for the same pod.
+      - source_matchers:
+          - severity = "critical"
+        target_matchers:
+          - severity = "warning"
+        equal: ["namespace", "pod"]
+
+      # Suppress latency, error, business, and SLO alerts when the API is down.
+      - source_matchers:
+          - alertname = "PaymentAPIDown"
+        target_matchers:
+          - alertname =~ "PaymentAPI(High|Critical)(ErrorRate|Latency)|PaymentAPIElevatedP95Latency|PaymentAPIHighFailureRate|PaymentAPINoSuccessfulTransactions|PaymentAPITransactionSpikeAnomaly|PaymentAPISLOBurnRateFast|PaymentAPISLOBurnRateSlow|PaymentAPIHighClientErrorRate"
+        equal: ["namespace"]
+
+      # Suppress all payment-api alerts during a maintenance window.
+      - source_matchers:
+          - alertname = "MaintenanceWindow"
+        target_matchers:
+          - namespace = "payment-api"
+        equal: ["namespace"]
