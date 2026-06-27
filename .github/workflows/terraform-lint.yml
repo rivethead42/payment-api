@@ -1,0 +1,83 @@
+name: Terraform Lint & Security
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform-lint.yml"
+  pull_request:
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform-lint.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TF_DIR: terraform
+
+jobs:
+  fmt:
+    name: terraform fmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: terraform fmt -check
+        run: terraform fmt -check -recursive
+        working-directory: ${{ env.TF_DIR }}
+
+  tflint:
+    name: tflint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: Init TFLint
+        run: tflint --init
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run TFLint
+        run: tflint --recursive --format compact
+        working-directory: ${{ env.TF_DIR }}
+
+  tfsec:
+    name: tfsec
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run tfsec
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: ${{ env.TF_DIR }}
+
+  checkov:
+    name: checkov
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: ${{ env.TF_DIR }}
+          framework: terraform
+          quiet: true
+          output_format: cli
